@@ -1,0 +1,16 @@
+# Local configurations
+.vscode
+
+# Virtual Environments and experimental files
+/venv*
+/experimental*
+
+# Local environment files
+/.env.local
+
+
+# Log files
+*logging.conf
+
+# Cache
+*__pycache__*

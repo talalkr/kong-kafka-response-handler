@@ -1,0 +1,186 @@
+version: "3.7"
+
+volumes:
+  kong_data: {}
+
+services:
+  #######################################
+  # Zookeeper
+  #######################################
+  zookeeper:
+    image: bitnami/zookeeper:latest
+    ports:
+      - "2181:2181"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+
+  #######################################
+  # Kafka
+  #######################################
+  kafka:
+    image: bitnami/kafka:latest
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+
+  #######################################
+  # Postgres: The database used by Kong
+  #######################################
+  kong-database:
+    image: postgres:9.6
+    container_name: kong-postgres
+    restart: on-failure
+    volumes:
+      - kong_data:/var/lib/postgresql/data
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${KONG_PG_USER}
+      POSTGRES_PASSWORD: ${KONG_PG_PASSWORD}
+      POSTGRES_DB: ${KONG_PG_DB}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "kong"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+
+  #######################################
+  # Kong: A built image to be reused by all kong services
+  #######################################
+  _kong_image_build:
+    image: my-kong-enterprise
+    command: ["echo", "build completed"]
+    environment:
+      KONG_DATABASE: ${KONG_DATABASE}
+      KONG_PG_HOST: ${KONG_PG_HOST}
+      KONG_PG_DATABASE: ${KONG_PG_DB}
+      KONG_PG_USER: ${KONG_PG_USER}
+      KONG_PG_PASSWORD: ${KONG_PG_PASSWORD}
+      KONG_PASSWORD: ${KONG_PASSWORD}
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+  #######################################
+  # Kong database migration
+  #######################################
+  kong-migration-bootstrap:
+    image: my-kong-enterprise
+    command: kong migrations bootstrap
+    restart: on-failure
+    env_file:
+      - .env
+    depends_on:
+      - kong-database
+
+  #######################################
+  # Kong migrations up
+  #######################################
+  kong-migration-up:
+    image: my-kong-enterprise
+    command: kong migrations up
+    restart: on-failure
+    env_file:
+      - .env
+    depends_on:
+      - kong-database
+
+  #######################################
+  # Kong migrations finish
+  #######################################
+  kong-migration-finish:
+    image: my-kong-enterprise
+    command: kong migrations finish
+    restart: on-failure
+    env_file:
+      - .env
+    depends_on:
+      - kong-database
+
+  #######################################
+  # Kong: The API Gateway
+  #######################################
+  kong:
+    image: my-kong-enterprise
+    volumes:
+      - ./python-plugins:/usr/local/kong/python-plugins
+    restart: on-failure
+    env_file:
+      - .env
+    environment:
+      # DB Setup
+      KONG_DATABASE: ${KONG_DATABASE}
+      KONG_PG_HOST: ${KONG_PG_HOST}
+      KONG_PG_DATABASE: ${KONG_PG_DB}
+      KONG_PG_USER: ${KONG_PG_USER}
+      KONG_PG_PASSWORD: ${KONG_PG_PASSWORD}
+      # MISC
+      KONG_AUDIT_LOG: "on"
+      KONG_LOG_LEVEL: debug
+      KONG_ANONYMOUS_REPORTS: "off"
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_PROXY_LISTEN: kong:8000, kong:8443 ssl
+      KONG_ADMIN_LISTEN: kong:8001, kong:8444 ssl
+      KONG_ADMIN_GUI_LISTEN: kong:8002, kong:8445 ssl
+      KONG_PORTAL_GUI_LISTEN: kong:8003, kong:8446 ssl
+      KONG_PORTAL_API_LISTEN: kong:8004, kong:8447 ssl
+      # PLUGINS: Enable the Py plugin server
+      KONG_PLUGINS: bundled,custom_kafka_producer,custom_kafka_consumer
+      KONG_PLUGINSERVER_NAMES: python
+      KONG_PLUGINSERVER_PYTHON_SOCKET: /usr/local/kong/python_pluginserver.sock
+      KONG_PLUGINSERVER_PYTHON_START_CMD: /usr/bin/kong-python-pluginserver --plugins-directory /usr/local/kong/python-plugins
+      KONG_PLUGINSERVER_PYTHON_QUERY_CMD: /usr/bin/kong-python-pluginserver --plugins-directory /usr/local/kong/python-plugins --dump-all-plugins
+      # ENTERPRISE VARIABLES
+      # -- Admin
+      KONG_ADMIN_GUI_URL: http://localhost:8002
+      KONG_ADMIN_API_URI: http://localhost:8001
+      # -- RBAC
+      # Disable RBAC first, create admin and generate a link, then enable it
+      # see https://docs.konghq.com/enterprise/2.5.x/kong-manager/authentication/super-admin/
+      KONG_ENFORCE_RBAC: ${KONG_ENFORCE_RBAC}
+      KONG_ADMIN_GUI_AUTH: ${KONG_ADMIN_GUI_AUTH-}
+      KONG_ADMIN_GUI_SESSION_CONF: ${KONG_ADMIN_GUI_SESSION_CONF-}
+      KONG_PASSWORD: ${KONG_PASSWORD}
+      # -- Portal
+      KONG_PORTAL_GUI_HOST: localhost:8003
+      KONG_PORTAL_GUI_PROTOCOL: http
+      KONG_PORTAL: ${KONG_PORTAL}
+      KONG_PORTAL_AUTH: ${KONG_PORTAL_AUTH-}
+      KONG_PORTAL_SESSION_CONF: ${KONG_PORTAL_SESSION_CONF-}
+      # -- License
+      KONG_LICENSE_DATA: ${KONG_LICENSE_DATA-}
+      # -- Vitals
+      KONG_VITALS: ${KONG_VITALS-}
+    depends_on:
+      - _kong_image_build
+      - kong-database
+      - kong-migration-bootstrap
+      - kong-migration-up
+      - kong-migration-finish
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8443:8443"
+      - "8444:8444"
+      - "8002:8002"
+      - "8003:8003"
+
+networks:
+  default:
+    external: true
+    name: internal
