@@ -15,14 +15,13 @@ logging.basicConfig(
 )
 
 # Kong Plugin Config
-Schema = ()
+Schema = ({"kafka_topic": {"type": "string", "required": True}},)
 version = "0.1.0"
 priority = 0
 
 
-# Set up environment variables to be used in custom plugins
+# Kafka Set up environment variables to be used in custom plugins
 BOOTSTRAP_SERVER = "kafka:9092"
-KAFKA_PRODUCE_TOPIC = "feedback"
 
 
 class Plugin(object):
@@ -51,27 +50,26 @@ class Plugin(object):
             logging.error(f"Exception dr: {err}")
 
     def access(self, kong: kong.kong):
-        """Queue the request body into the Kafka message broker using a Kafka producer"""
+        """Produce the request body into a Kafka Topic received from the Schema"""
         try:
             body, err = kong.request.get_body()
             body["correlation-id"] = kong.request.get_header("Kong-Request-ID")[0]
 
             body_replaced_single_quotes = str(body).replace("'", '"')
             body_encoded = body_replaced_single_quotes.encode("utf-8")
-            logging.info(f"THE ENCODED REQUEST {body_encoded}")
 
             self.producer.poll(0)
             # Asynchronously produce a message, the delivery report callback
             # will be triggered from poll() below when the message has
             # been successfully delivered or failed permanently.
             self.producer.produce(
-                KAFKA_PRODUCE_TOPIC,
+                self.config.get("kafka_topic"),
                 body_encoded,
                 callback=self.delivery_report,
             )
             self.producer.flush()
 
-            logging.info(f"SENT REQUEST BODY: {body_encoded}")
+            logging.info(f"Sent request with correlation-id: {body['correlation-id']}")
 
         except Exception as err:
             logging.error(f"Exception: {err}")

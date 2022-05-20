@@ -18,15 +18,20 @@ logging.basicConfig(
 
 # Set up environment variables to be used in custom plugins
 BOOTSTRAP_SERVER = "kafka:9092"
-KAFKA_FEEDBACK_TOPIC = "feedback"
+KAFKA_FEEDBACK_TOPIC = "kong.feedback"
 
-Schema = ()
+Schema = ({"max_timeout": {"type": "number", "default": 1, "required": True}},)
+
 version = "0.1.0"
 priority = 0
 
-# message store key -> correlation-id, value -> message
+# message store:
+#   key -> correlation-id
+#   value -> message
 messages_store = {}
 
+
+# Kafka Consumer
 consumer = Consumer(
     {
         "bootstrap.servers": BOOTSTRAP_SERVER,
@@ -47,6 +52,11 @@ class Plugin(object):
 
     def __init__(self, config):
         self.config = config
+        max_timeout = self.config.get("max_timeout")
+
+        self.num_of_iterations = max_timeout * 25
+        self.consume_timeout = 0.04  # intentionally small to reduce blocking time
+        self.num_of_messages = 10  # depends on the consume_timeout
 
     def fetch_and_remove_from_store(self, correlation_id: UUID) -> dict:
         stored_message = messages_store.get(correlation_id)
@@ -61,104 +71,76 @@ class Plugin(object):
         Adds messages found in the stream to the store, these are messages
         that don't match the current request correlation ID
         """
-        logging.info(f"4. Adding message to store {message}")
+        logging.info(
+            f"Added message with correlation-id {message_correlation_id} to the store"
+        )
         messages_store[message_correlation_id] = message
 
-    def fetch_response_message(
-        self, request_correlation_id: str, messages: list
-    ) -> dict:
-        """
-        Iterates messages that came from the stream
-        :returns: the message with a matching correlation id in the kong request, otherwise None
-        """
-        # TOOD: must use message.error() on each message
-        response_message = None
-
+    def extract_messages(self, messages: list) -> None:
+        """Extracts messages from stream and adds them to the store"""
         for message in messages:
-            # decoded_message = ast.literal_eval(message.value().decode("utf-8"))
+            try:
+                message.error()
+            except Exception as error:
+                logging.error(error)
+
             decoded_message = str(message.value().decode("utf-8")).replace("'", '"')
+
             if type(decoded_message) == str:
                 decoded_message = json.loads(decoded_message)
 
-            message_correlation_id = decoded_message.get("correlation-id")
-            logging.info(
-                f"{request_correlation_id} == {message_correlation_id} is {request_correlation_id == message_correlation_id}"
+            self.add_message_to_store(
+                message_correlation_id=decoded_message.get("correlation-id"),
+                message=decoded_message,
             )
-
-            if request_correlation_id == message_correlation_id:
-                response_message = decoded_message
-            else:
-                self.add_message_to_store(
-                    message_correlation_id=message_correlation_id,
-                    message=decoded_message,
-                )
-
-        return response_message
 
     def iterative_consume(
         self,
-        request_correlation_id: str,
+        num_of_messages: int,
         num_of_iterations: int,
         consume_timeout: float,
-    ):
+    ) -> None:
         """
-        Consumes Kafka messages with a timeout, this happens based on the `num_of_iterations`
-        If messages are found, they are added to the store
-        If a response message is found, i.e. correlation_id matches the request correlation_id,
-            Then it is returned right away
+        :param num_of_messages (int): the number of messages to consume from the kafka stream in one iteration
+        :param num_of_iterations (int): the number of iterations to call consume()
+        :param consume_timeout (float): the maximum amount of time the consumer must wait if no messages were found while consuming
 
         Iteration Example:
-            if consume_timeout = 0.04 and num_of_iterations = 25
-            Then the consumer will run every 40ms until a message is found, if none is found
-            Then it timeout after 1 second since 0.04 (ms) * 25 (iterations) = 1 second
+            assume consume_timeout = 0.04 and num_of_iterations = 25
+            the consumer consumes 50 messages before it reaches the timeout of 40 ms, it repeats that 25 times
+            Total wait time is 40 (ms) * 25 (iterations) = 1 second
         """
-        i = 0
-        response_message = None
-
-        while i < num_of_iterations:
-            messages = consumer.consume(5, timeout=consume_timeout)
+        for _ in range(num_of_iterations):
+            messages = consumer.consume(num_of_messages, timeout=consume_timeout)
 
             if not messages:
-                stored_message = self.fetch_and_remove_from_store(
-                    request_correlation_id
-                )
-                if stored_message:
-                    return stored_message
-
-                logging.error(f"no messages found by consumer in iteration{i}")
-                i += 1
                 continue
 
-            response_message = self.fetch_response_message(
-                request_correlation_id, messages
-            )
-            if response_message:
-                break
-
-            i += 1
-
-        return response_message
+            self.extract_messages(messages)
 
     def response(self, kong: kong.kong):
         """Consume the message from the Kafka message broker and return it as the response body"""
         correlation_id = kong.request.get_header("Kong-Request-ID")[0]
 
-        stored_message = self.fetch_and_remove_from_store(correlation_id)
-        if stored_message:
-            logging.info(f"SUCCESS fetched stored message {stored_message}")
-            return kong.response.exit(200, stored_message)
-
-        # Consume messages for a maximum of 1 second
         decoded_message = self.iterative_consume(
-            request_correlation_id=correlation_id,
-            num_of_iterations=25,
-            consume_timeout=0.04,
+            num_of_messages=self.num_of_messages,
+            num_of_iterations=self.num_of_iterations,
+            consume_timeout=self.consume_timeout,
         )
         if decoded_message:
-            logging.info(f"SUCCESS consumer found the message {decoded_message}")
+            logging.info(
+                f"successfully consumed message with correlation-id {correlation_id} consumed from stream"
+            )
             return kong.response.exit(200, decoded_message)
 
-        logging.error(f"FAILURE with correlation-id {correlation_id}")
+        stored_message = self.fetch_and_remove_from_store(correlation_id)
+        if stored_message:
+            logging.info(
+                f"successfully cached message retrieved with correlation-id {correlation_id}"
+            )
+            return kong.response.exit(200, stored_message)
+
+        logging.error(f"failed message with correlation-id {correlation_id}")
         return kong.response.exit(400, {"message": "failed to get message"})
 
 
