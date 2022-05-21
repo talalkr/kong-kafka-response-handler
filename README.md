@@ -17,7 +17,7 @@ Learn more about:
 1. [Kafka](https://kafka.apache.org/intro)
 2. [Kong API Gateway Plugin Development](https://docs.konghq.com/gateway/2.7.x/plugin-development/)
 
-It is possible that only an Kong Enterprise allows enabling custom plugins.
+It is possible that only an Kong **Enterprise** allows enabling custom plugins.
 
 ### Context
 
@@ -68,8 +68,9 @@ Run the project:
 - `docker-compose up -d`
 
 ### Test the plugins locally
+Run this [Faust app](https://github.com/talalkr/faust-app) or any backend service alongside the response handler that consumes and produces Kafka messages from this API Gateway.
 
-1. Visit http://localhost:8002 and login with your `kong_admin` credentials if Kong Enterprise is enabled.
-2. Setup your first service, then create a route.
+1. Visit http://localhost:8002 and login to Kong Manager with the `kong_admin` credentials.
+2. Configure the Kong service to hit this [Faust app](https://github.com/talalkr/faust-app), then create a route.
 3. Add the following plugins for the route that has been created: `custom_kafka_producer` and `custom_kafka_consumer`.
-4. The proxy is available at http://localhost:8000/, Hit the URI that was created in your route.
+5. The proxy is available at http://localhost:8000/, Hit the URI that was created in your route.
