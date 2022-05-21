@@ -67,10 +67,6 @@ class Plugin(object):
         return stored_message
 
     def add_message_to_store(self, message_correlation_id: str, message: dict) -> None:
-        """
-        Adds messages found in the stream to the store, these are messages
-        that don't match the current request correlation ID
-        """
         logging.info(
             f"Added message with correlation-id {message_correlation_id} to the store"
         )
@@ -96,6 +92,7 @@ class Plugin(object):
 
     def iterative_consume(
         self,
+        correlation_id: str,
         num_of_messages: int,
         num_of_iterations: int,
         consume_timeout: float,
@@ -110,19 +107,26 @@ class Plugin(object):
             the consumer consumes 50 messages before it reaches the timeout of 40 ms, it repeats that 25 times
             Total wait time is 40 (ms) * 25 (iterations) = 1 second
         """
+        stored_message = None
+
         for _ in range(num_of_iterations):
             messages = consumer.consume(num_of_messages, timeout=consume_timeout)
 
-            if not messages:
-                continue
+            if messages:
+                self.extract_messages(messages)
 
-            self.extract_messages(messages)
+            stored_message = self.fetch_and_remove_from_store(correlation_id)
+            if stored_message:
+                break
+
+        return stored_message
 
     def response(self, kong: kong.kong):
         """Consume the message from the Kafka message broker and return it as the response body"""
         correlation_id = kong.request.get_header("Kong-Request-ID")[0]
 
         decoded_message = self.iterative_consume(
+            correlation_id=correlation_id,
             num_of_messages=self.num_of_messages,
             num_of_iterations=self.num_of_iterations,
             consume_timeout=self.consume_timeout,
@@ -136,11 +140,13 @@ class Plugin(object):
         stored_message = self.fetch_and_remove_from_store(correlation_id)
         if stored_message:
             logging.info(
-                f"successfully cached message retrieved with correlation-id {correlation_id}"
+                f"successfully retrieved cached message with correlation-id {correlation_id}"
             )
             return kong.response.exit(200, stored_message)
 
-        logging.error(f"failed message with correlation-id {correlation_id}")
+        logging.error(
+            f"failed to retrieve message with correlation-id {correlation_id}"
+        )
         return kong.response.exit(400, {"message": "failed to get message"})
 
 
