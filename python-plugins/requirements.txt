@@ -1,2 +1,3 @@
 kong-pdk==0.27
 confluent-kafka==1.7.0
+ksql==0.10.2

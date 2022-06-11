@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-import json
-from os import path
+import ast
+from os import path, environ
 import logging
-from uuid import UUID
+
+from ksql import KSQLAPI
 import kong_pdk.pdk.kong as kong
 from kong_pdk.cli import start_dedicated_server
-from confluent_kafka import Consumer
 
 # setup logging
 log_file_path = path.join(path.dirname(path.abspath(__file__)), "logging.conf")
@@ -16,32 +16,31 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# Set up environment variables to be used in custom plugins
-BOOTSTRAP_SERVER = "kafka:9092"
-KAFKA_FEEDBACK_TOPIC = "kong.feedback"
+KAFKA_BOOTSTRAP_SERVER = environ.get("KAFKA_BOOTSTRAP_SERVER")
+KAFKA_FEEDBACK_TOPIC = environ.get("KAFKA_FEEDBACK_TOPIC")
+ROW_QUERY_INDEX = 1
 
-Schema = ({"max_timeout": {"type": "number", "default": 1, "required": True}},)
-
+Schema = ()
 version = "0.1.0"
 priority = 0
 
-# message store:
-#   key -> correlation-id
-#   value -> message
-messages_store = {}
 
+# KSQL
+ksql_client = KSQLAPI(environ.get("KSQL_URL"))
 
-# Kafka Consumer
-consumer = Consumer(
-    {
-        "bootstrap.servers": BOOTSTRAP_SERVER,
-        "group.id": "test-group",
-        "auto.offset.reset": "latest",
-        "enable.auto.commit": "true",
-    }
+# -- Create stream if it doesn't exist
+ksql_client.ksql(
+    f"""
+        CREATE STREAM IF NOT EXISTS message (
+            correlation_id STRING,
+            message STRING
+        ) WITH (
+            KAFKA_TOPIC = '{KAFKA_FEEDBACK_TOPIC}',
+            KEY_FORMAT = 'NONE',
+            VALUE_FORMAT = 'JSON'
+        )
+    """
 )
-consumer.subscribe([KAFKA_FEEDBACK_TOPIC])
-logging.info("Consumer is running...")
 
 
 class Plugin(object):
@@ -52,101 +51,43 @@ class Plugin(object):
 
     def __init__(self, config):
         self.config = config
-        max_timeout = self.config.get("max_timeout")
 
-        self.num_of_iterations = max_timeout * 25
-        self.consume_timeout = 0.04  # intentionally small to reduce blocking time
-        self.num_of_messages = 10  # depends on the consume_timeout
+    def get_query_response(self, query) -> list:
+        """Loop through KSQL DB Query response and combine message parts to retrieve complete message"""
+        full_message = ""
 
-    def fetch_and_remove_from_store(self, correlation_id: UUID) -> dict:
-        stored_message = messages_store.get(correlation_id)
+        try:
+            for resp in query:
+                full_message = f"{full_message}{resp}"
+        except Exception as e:
+            logging.error(e)
 
-        if stored_message:
-            del messages_store[correlation_id]
+        return full_message
 
-        return stored_message
-
-    def add_message_to_store(self, message_correlation_id: str, message: dict) -> None:
-        logging.info(
-            f"Added message with correlation-id {message_correlation_id} to the store"
+    def get_message_by_correlation_id(self, correlation_id: str) -> None:
+        """Query KSQL DB to retrieve kafka message by correlation_id"""
+        query = ksql_client.query(
+            f"""
+            SELECT * FROM message WHERE correlation_id = '{correlation_id}'
+            """
         )
-        messages_store[message_correlation_id] = message
 
-    def extract_messages(self, messages: list) -> None:
-        """Extracts messages from stream and adds them to the store"""
-        for message in messages:
-            try:
-                message.error()
-            except Exception as error:
-                logging.error(error)
+        message = self.get_query_response(query)
+        message_list = ast.literal_eval(message)
 
-            decoded_message = str(message.value().decode("utf-8")).replace("'", '"')
-
-            if type(decoded_message) == str:
-                decoded_message = json.loads(decoded_message)
-
-            self.add_message_to_store(
-                message_correlation_id=decoded_message.get("correlation-id"),
-                message=decoded_message,
-            )
-
-    def iterative_consume(
-        self,
-        correlation_id: str,
-        num_of_messages: int,
-        num_of_iterations: int,
-        consume_timeout: float,
-    ) -> None:
-        """
-        :param num_of_messages (int): the number of messages to consume from the kafka stream in one iteration
-        :param num_of_iterations (int): the number of iterations to call consume()
-        :param consume_timeout (float): the maximum amount of time the consumer must wait if no messages were found while consuming
-
-        Iteration Example:
-            assume consume_timeout = 0.04 and num_of_iterations = 25
-            the consumer consumes 50 messages before it reaches the timeout of 40 ms, it repeats that 25 times
-            Total wait time is 40 (ms) * 25 (iterations) = 1 second
-        """
-        stored_message = None
-
-        for _ in range(num_of_iterations):
-            messages = consumer.consume(num_of_messages, timeout=consume_timeout)
-
-            if messages:
-                self.extract_messages(messages)
-
-            stored_message = self.fetch_and_remove_from_store(correlation_id)
-            if stored_message:
-                break
-
-        return stored_message
+        correlation_id, message = message_list[ROW_QUERY_INDEX].get("row").get("columns")
+        return message
 
     def response(self, kong: kong.kong):
         """Consume the message from the Kafka message broker and return it as the response body"""
         correlation_id = kong.request.get_header("Kong-Request-ID")[0]
 
-        decoded_message = self.iterative_consume(
-            correlation_id=correlation_id,
-            num_of_messages=self.num_of_messages,
-            num_of_iterations=self.num_of_iterations,
-            consume_timeout=self.consume_timeout,
-        )
+        decoded_message = self.get_message_by_correlation_id(correlation_id=correlation_id)
         if decoded_message:
-            logging.info(
-                f"successfully consumed message with correlation-id {correlation_id} consumed from stream"
-            )
+            logging.info(f"successfully consumed message with correlation_id {correlation_id} consumed from stream")
             return kong.response.exit(200, decoded_message)
 
-        stored_message = self.fetch_and_remove_from_store(correlation_id)
-        if stored_message:
-            logging.info(
-                f"successfully retrieved cached message with correlation-id {correlation_id}"
-            )
-            return kong.response.exit(200, stored_message)
-
-        logging.error(
-            f"failed to retrieve message with correlation-id {correlation_id}"
-        )
+        logging.error(f"failed to retrieve message with correlation_id {correlation_id}")
         return kong.response.exit(400, {"message": "failed to get message"})
 
 

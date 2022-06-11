@@ -29,6 +29,36 @@ services:
       - ALLOW_PLAINTEXT_LISTENER=yes
 
   #######################################
+  # KSQL + Schema Regsitry
+  #######################################
+  schema-registry:
+    image: confluentinc/cp-schema-registry:6.2.4
+    depends_on:
+      - kafka
+      - zookeeper
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+
+
+  ksqldb-server:
+    image: ${KSQL_IMAGE_BASE}confluentinc/ksqldb-server:0.26.0
+    hostname: ksqldb-server
+    container_name: ksqldb-server
+    depends_on:
+      - kafka
+      - schema-registry
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      KSQL_BOOTSTRAP_SERVERS: kafka:9092
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: "true"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: "true"
+
+
+  #######################################
   # Postgres: The database used by Kong
   #######################################
   kong-database:
@@ -140,7 +170,12 @@ services:
       KONG_PLUGINSERVER_PYTHON_SOCKET: /usr/local/kong/python_pluginserver.sock
       KONG_PLUGINSERVER_PYTHON_START_CMD: /usr/bin/kong-python-pluginserver --plugins-directory /usr/local/kong/python-plugins
       KONG_PLUGINSERVER_PYTHON_QUERY_CMD: /usr/bin/kong-python-pluginserver --plugins-directory /usr/local/kong/python-plugins --dump-all-plugins
-      # ENTERPRISE VARIABLES
+      # -- PLUGIN ENV VARIABLES
+      # The following variables will be injected inside the NGINX directive
+      # Meaning, only they can be accessed by the custom plugins
+      # For more information: https://github.com/Kong/kong/issues/7083#issuecomment-826640748
+      KONG_NGINX_MAIN_ENV: KAFKA_BOOTSTRAP_SERVER;env KAFKA_FEEDBACK_TOPIC;env KSQL_URL
+      # KONG ENTERPRISE VARIABLES
       # -- Admin
       KONG_ADMIN_GUI_URL: http://localhost:8002
       KONG_ADMIN_API_URI: http://localhost:8001
