@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from os import path
+from os import environ, path
 import logging
 import kong_pdk.pdk.kong as kong
 from confluent_kafka import Producer
@@ -14,14 +14,12 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+KAFKA_BOOTSTRAP_SERVER = environ.get("KAFKA_BOOTSTRAP_SERVER")
+
 # Kong Plugin Config
 Schema = ({"kafka_topic": {"type": "string", "required": True}},)
 version = "0.1.0"
 priority = 0
-
-
-# Kafka Set up environment variables to be used in custom plugins
-BOOTSTRAP_SERVER = "kafka:9092"
 
 
 class Plugin(object):
@@ -33,7 +31,7 @@ class Plugin(object):
         self.config = config
         self.producer = Producer(
             {
-                "bootstrap.servers": BOOTSTRAP_SERVER,
+                "bootstrap.servers": KAFKA_BOOTSTRAP_SERVER,
             }
         )
         logging.info("Producer is running...")
@@ -53,7 +51,7 @@ class Plugin(object):
         """Produce the request body into a Kafka Topic received from the Schema"""
         try:
             body, err = kong.request.get_body()
-            body["correlation-id"] = kong.request.get_header("Kong-Request-ID")[0]
+            body["correlation_id"] = kong.request.get_header("Kong-Request-ID")[0]
 
             body_replaced_single_quotes = str(body).replace("'", '"')
             body_encoded = body_replaced_single_quotes.encode("utf-8")
@@ -69,7 +67,7 @@ class Plugin(object):
             )
             self.producer.flush()
 
-            logging.info(f"Sent request with correlation-id: {body['correlation-id']}")
+            logging.info(f"Sent request with correlation_id: {body['correlation_id']}")
 
         except Exception as err:
             logging.error(f"Exception: {err}")
